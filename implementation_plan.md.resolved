@@ -1,0 +1,44 @@
+# Vapi-Driven Multi-Tenant Voice Platform
+
+Based on your clarification, here is the detailed architectural plan to build out this platform. We are shifting from a single-tenant prototype to a fully-fledged, multi-tenant SaaS backend.
+
+## 1. Core Vapi Orchestrator Stack
+When our FastAPI backend provisions an agent on Vapi, it will strictly configure the agent to use:
+* **STT (Ears):** Deepgram `nova-2`
+* **LLM (Brain):** OpenAI
+* **TTS (Mouth):** ElevenLabs `eleven_flash_v2`
+
+## 2. Agent Creation & Knowledge Merging
+**Goal:** Dynamically spin up agents per business.
+* **Document Upload API:** A new endpoint that accepts two files per `business_id`:
+  1. `business_scripts` (Greeting, Persona, Rules)
+  2. `menu` (Products, Prices, FAQs)
+* **Merge Engine:** The backend will extract the text from both files and merge them into a single, comprehensive System Prompt.
+* **Vapi Provisioning:** The backend will call Vapi's `POST /assistant` endpoint to create a permanent agent tied to the `business_id`, injecting the merged text directly into the OpenAI LLM prompt configuration.
+
+## 3. Telephony & Twilio Management
+**Goal:** Handle all phone numbers via a single master Twilio account, linked to Vapi.
+* **Twilio Number Import API:** Endpoint to fetch available/purchased numbers from your Twilio account.
+* **Number Assignment:** Endpoint to call Vapi's `POST /phone-number` API. This links a specific Twilio phone number directly to the `assistant_id` we generated in Step 2. When someone dials that number, Vapi automatically knows which business's agent to trigger.
+
+## 4. Post-Call Webhook & AI Summarization
+**Goal:** Collect and process call data after the user hangs up.
+* **Vapi Webhook Endpoint:** Our backend will expose a URL (e.g., `/api/vapi-webhook`) that Vapi pings at the end of every call (`end-of-call-report`).
+* **Data Extraction:** We will extract the **Recording URL**, the **Raw Transcript**, and any **Order Summaries** (if we used Vapi function calling for orders).
+* **AI Summary Generator:** The backend will take the raw transcript and pass it through a quick OpenAI call to generate a clean, readable **AI Summary** of the interaction.
+* **Storage:** All this data (Transcript, Recording, Summary) will be stored in the database under the specific `business_id`.
+
+## 5. Interface Endpoints (For your Frontend)
+We will build the FastAPI routes necessary for you to build the UI:
+* `GET /agents/{business_id}`: List agents.
+* `POST /agents/create`: Upload files and spawn the agent.
+* `GET /calls/{business_id}`: Fetch all past calls, transcripts, recordings, and AI summaries.
+* `POST /telephony/link`: Link a Twilio number to an agent.
+* `POST /calls/live-test`: Initiate an outbound call to a test phone number to instantly QA the agent.
+
+> [!IMPORTANT]
+> **User Review Required:** 
+> 1. For the database, since we need to track `business_id`, Twilio numbers, and call logs, I highly recommend we switch from the `.txt` / `.json` files to a real database (SQLite is perfect and zero-setup for now, or PostgreSQL). Do you approve setting up an SQLite DB to start?
+> 2. Are there any merge conflicts I should watch out for if the `business_scripts` and `menu` formats are drastically different (e.g., PDF vs DOCX)? I see `extractor.py` handles PDF and Word docs natively.
+
+If this architecture perfectly matches your vision, let me know and we will begin building the database models and the Vapi API connector!
