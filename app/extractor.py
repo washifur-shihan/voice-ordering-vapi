@@ -76,16 +76,33 @@ def extract_text(file_path: str) -> str:
 
     raise ValueError("Unsupported file type. Only PDF, DOC, DOCX, TXT, XLSX, CSV are allowed.")
 
-def generate_uk_restaurant_prompt(business_rules: str, menu_text: str) -> str:
+def generate_uk_restaurant_prompt(
+    business_rules: str,
+    menu_text: str,
+    special_offers_text: str = ""
+) -> str:
     """
     Generates a highly optimized System Prompt for a UK Restaurant/Takeaway.
+    Optionally injects active special offers/deals for natural upselling.
     """
-    # Get the absolute path to the prompt file (in case this script is run from a different directory)
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prompt_path = os.path.join(base_dir, "uk_system_prompt.txt")
-    
+
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt_template = f.read()
-        
-    prompt = prompt_template.format(business_rules=business_rules, menu_text=menu_text)
+
+    cleaned_special_offers = (special_offers_text or "").strip()
+
+    if not cleaned_special_offers:
+        cleaned_special_offers = (
+            "No active special offers are currently configured. "
+            "Do not invent discounts, meal deals, free drinks, bundles, or collection offers."
+        )
+
+    prompt = prompt_template.format(
+        business_rules=business_rules,
+        menu_text=menu_text,
+        special_offers_text=cleaned_special_offers
+    )
+
     return prompt
