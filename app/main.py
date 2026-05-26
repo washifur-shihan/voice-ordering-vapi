@@ -1,6 +1,7 @@
 import os
 import shutil
 import requests
+from typing import Optional
 from fastapi import FastAPI, UploadFile, Form, HTTPException, File, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -175,50 +176,86 @@ class TelephonyLinkRequest(BaseModel):
 async def create_agent(
     business_id: str = Form(...),
     rules_file: UploadFile = File(...),
-    menu_file: UploadFile = File(...)
+    menu_file: UploadFile = File(...),
+    special_offers_text: str = Form(""),
+    special_offers_file: Optional[UploadFile] = File(None)
 ):
     """
     1. Receives the Business Rules (PDF/Doc) and Menu (Excel/CSV)
     2. Extracts the text using extractor.py
-    3. Merges them into a highly optimized UK Restaurant System Prompt
-    4. Calls Vapi to provision the agent, injecting the business_id as metadata.
+    3. Optionally receives Special Offers as text or file
+    4. Merges everything into a highly optimized UK Restaurant System Prompt
+    5. Calls Vapi to provision the agent, injecting the business_id as metadata.
     """
+    saved_paths = []
+
     try:
-        # Save files temporarily
+        # Save required files temporarily
         rules_path = f"uploads/{business_id}_rules_{rules_file.filename}"
         menu_path = f"uploads/{business_id}_menu_{menu_file.filename}"
-        
+
+        saved_paths.extend([rules_path, menu_path])
+
         with open(rules_path, "wb") as buffer:
             shutil.copyfileobj(rules_file.file, buffer)
-            
+
         with open(menu_path, "wb") as buffer:
             shutil.copyfileobj(menu_file.file, buffer)
-            
-        # Extract Text
+
+        # Extract required text
         rules_text = extract_text(rules_path)
         menu_text = extract_text(menu_path)
-        
-        # Generate Perfect Prompt
-        system_prompt = generate_uk_restaurant_prompt(rules_text, menu_text)
-        
-        # Create Vapi Assistant (Auto-links the global tool ID from .env)
+
+        # Optional special offers can come from:
+        # 1. special_offers_text from the business owner dashboard
+        # 2. special_offers_file uploaded as PDF/DOCX/TXT/XLSX/CSV
+        # 3. both at the same time
+        offers_parts = []
+
+        if special_offers_text and special_offers_text.strip():
+            offers_parts.append(special_offers_text.strip())
+
+        if special_offers_file and special_offers_file.filename:
+            offers_path = f"uploads/{business_id}_special_offers_{special_offers_file.filename}"
+            saved_paths.append(offers_path)
+
+            with open(offers_path, "wb") as buffer:
+                shutil.copyfileobj(special_offers_file.file, buffer)
+
+            extracted_offers = extract_text(offers_path).strip()
+            if extracted_offers:
+                offers_parts.append(extracted_offers)
+
+        special_offers = "\n".join(part for part in offers_parts if part)
+
+        # Generate system prompt with optional Special Offers
+        system_prompt = generate_uk_restaurant_prompt(
+            rules_text,
+            menu_text,
+            special_offers_text=special_offers
+        )
+
+        # Create or update Vapi Assistant
         vapi_response = create_assistant(business_id, system_prompt)
-        
-        # Clean up files
-        os.remove(rules_path)
-        os.remove(menu_path)
-        
+
         return {
             "status": "success",
             "business_id": business_id,
             "assistant_id": vapi_response.get("id"),
+            "special_offers_added": bool(special_offers.strip()),
             "vapi_response": vapi_response
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
+    finally:
+        for path in saved_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 @app.post("/api/telephony/link")
 async def link_phone(request: TelephonyLinkRequest):
     """
