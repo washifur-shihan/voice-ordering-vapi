@@ -82,8 +82,8 @@ def generate_uk_restaurant_prompt(
     special_offers_text: str = ""
 ) -> str:
     """
-    Generates a highly optimized System Prompt for a UK Restaurant/Takeaway.
-    Optionally injects active special offers/deals for natural upselling.
+    Generates a UK restaurant system prompt.
+    If special offers are empty, the assistant is told that no offers are active.
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prompt_path = os.path.join(base_dir, "uk_system_prompt.txt")
@@ -96,7 +96,7 @@ def generate_uk_restaurant_prompt(
     if not cleaned_special_offers:
         cleaned_special_offers = (
             "No active special offers are currently configured. "
-            "Do not invent discounts, meal deals, free drinks, bundles, or collection offers."
+            "Do not mention, create, suggest, or apply any special offers, discounts, bundles, free drinks, meal deals, or collection discounts."
         )
 
     prompt = prompt_template.format(

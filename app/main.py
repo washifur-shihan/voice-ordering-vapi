@@ -15,6 +15,8 @@ EXTERNAL_BACKEND_URL = os.getenv("EXTERNAL_BACKEND_URL", "")
 from app.extractor import extract_text, generate_uk_restaurant_prompt
 from app.vapi_client import create_assistant, link_telephony
 
+from app.business_store import save_business_config, get_business_config
+
 def parse_single_string_item(item_str: str) -> dict:
     import re
     item_str = item_str.strip()
@@ -172,25 +174,27 @@ class TelephonyLinkRequest(BaseModel):
     twilio_number: str
     manager_number: str
 
+class SpecialOffersUpdateRequest(BaseModel):
+    enabled: bool
+    special_offers_text: Optional[str] = None
+
 @app.post("/api/agents/create")
 async def create_agent(
     business_id: str = Form(...),
     rules_file: UploadFile = File(...),
     menu_file: UploadFile = File(...),
     special_offers_text: str = Form(""),
-    special_offers_file: Optional[UploadFile] = File(None)
+    special_offers_file: Optional[UploadFile] = File(None),
+    special_offers_enabled: bool = Form(True)
 ):
     """
-    1. Receives the Business Rules (PDF/Doc) and Menu (Excel/CSV)
-    2. Extracts the text using extractor.py
-    3. Optionally receives Special Offers as text or file
-    4. Merges everything into a highly optimized UK Restaurant System Prompt
-    5. Calls Vapi to provision the agent, injecting the business_id as metadata.
+    Creates or updates a Vapi assistant.
+    Special offers are optional.
+    The extracted rules/menu/offers are saved so they can be reused later when toggling offers on/off.
     """
     saved_paths = []
 
     try:
-        # Save required files temporarily
         rules_path = f"uploads/{business_id}_rules_{rules_file.filename}"
         menu_path = f"uploads/{business_id}_menu_{menu_file.filename}"
 
@@ -202,14 +206,9 @@ async def create_agent(
         with open(menu_path, "wb") as buffer:
             shutil.copyfileobj(menu_file.file, buffer)
 
-        # Extract required text
         rules_text = extract_text(rules_path)
         menu_text = extract_text(menu_path)
 
-        # Optional special offers can come from:
-        # 1. special_offers_text from the business owner dashboard
-        # 2. special_offers_file uploaded as PDF/DOCX/TXT/XLSX/CSV
-        # 3. both at the same time
         offers_parts = []
 
         if special_offers_text and special_offers_text.strip():
@@ -223,26 +222,45 @@ async def create_agent(
                 shutil.copyfileobj(special_offers_file.file, buffer)
 
             extracted_offers = extract_text(offers_path).strip()
+
             if extracted_offers:
                 offers_parts.append(extracted_offers)
 
-        special_offers = "\n".join(part for part in offers_parts if part)
+        saved_special_offers_text = "\n".join(offers_parts).strip()
 
-        # Generate system prompt with optional Special Offers
+        active_special_offers_text = (
+            saved_special_offers_text
+            if special_offers_enabled and saved_special_offers_text
+            else ""
+        )
+
         system_prompt = generate_uk_restaurant_prompt(
             rules_text,
             menu_text,
-            special_offers_text=special_offers
+            special_offers_text=active_special_offers_text
         )
 
-        # Create or update Vapi Assistant
         vapi_response = create_assistant(business_id, system_prompt)
+
+        save_business_config(
+            business_id,
+            {
+                "business_id": business_id,
+                "rules_text": rules_text,
+                "menu_text": menu_text,
+                "special_offers_enabled": special_offers_enabled,
+                "special_offers_text": saved_special_offers_text,
+                "assistant_id": vapi_response.get("id")
+            }
+        )
 
         return {
             "status": "success",
             "business_id": business_id,
             "assistant_id": vapi_response.get("id"),
-            "special_offers_added": bool(special_offers.strip()),
+            "special_offers_enabled": special_offers_enabled,
+            "special_offers_active_in_prompt": bool(active_special_offers_text),
+            "message": "Agent created or updated successfully.",
             "vapi_response": vapi_response
         }
 
@@ -256,6 +274,80 @@ async def create_agent(
                     os.remove(path)
             except Exception:
                 pass
+
+
+@app.patch("/api/agents/{business_id}/special-offers")
+async def update_special_offers(
+    business_id: str,
+    request: SpecialOffersUpdateRequest
+):
+    """
+    Turns special offers on or off.
+    This regenerates the full system prompt and updates the existing Vapi assistant.
+    """
+    try:
+        config = get_business_config(business_id)
+
+        if not config:
+            raise HTTPException(
+                status_code=404,
+                detail="Business config not found. Create the agent first using /api/agents/create."
+            )
+
+        current_saved_offers = config.get("special_offers_text", "").strip()
+
+        # If special_offers_text is provided, update the saved offer text.
+        # If it is not provided, keep the previous saved offer text.
+        if request.special_offers_text is not None:
+            saved_special_offers_text = request.special_offers_text.strip()
+        else:
+            saved_special_offers_text = current_saved_offers
+
+        # This is the important part.
+        # If enabled is false, active_special_offers_text becomes empty.
+        # Then generate_uk_restaurant_prompt() inserts "No active special offers..."
+        active_special_offers_text = (
+            saved_special_offers_text
+            if request.enabled and saved_special_offers_text
+            else ""
+        )
+
+        system_prompt = generate_uk_restaurant_prompt(
+            config["rules_text"],
+            config["menu_text"],
+            special_offers_text=active_special_offers_text
+        )
+
+        # Your create_assistant() already PATCHES the existing Vapi assistant
+        # if it finds the same business_id.
+        vapi_response = create_assistant(business_id, system_prompt)
+
+        config["special_offers_enabled"] = request.enabled
+        config["special_offers_text"] = saved_special_offers_text
+        config["assistant_id"] = vapi_response.get("id")
+
+        save_business_config(business_id, config)
+
+        return {
+            "status": "success",
+            "business_id": business_id,
+            "assistant_id": vapi_response.get("id"),
+            "special_offers_enabled": request.enabled,
+            "special_offers_active_in_prompt": bool(active_special_offers_text),
+            "message": (
+                "Special offers are now enabled in the assistant prompt."
+                if request.enabled
+                else "Special offers are now removed from the assistant prompt."
+            )
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
 @app.post("/api/telephony/link")
 async def link_phone(request: TelephonyLinkRequest):
     """
